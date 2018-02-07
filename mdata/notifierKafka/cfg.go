@@ -7,21 +7,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Shopify/sarama"
+	//"github.com/Shopify/sarama"
+	confluent "github.com/confluentinc/confluent-kafka-go/kafka"
 	part "github.com/grafana/metrictank/cluster/partitioner"
 	"github.com/grafana/metrictank/kafka"
 	"github.com/grafana/metrictank/stats"
 	"github.com/raintank/worldping-api/pkg/log"
 	"github.com/rakyll/globalconf"
+	"github.com/twinj/uuid"
 )
 
 var Enabled bool
 var brokerStr string
-var brokers []string
 var topic string
 var offsetStr string
 var dataDir string
-var config *sarama.Config
+var config confluent.ConfigMap
 var offsetDuration time.Duration
 var offsetCommitInterval time.Duration
 var partitionStr string
@@ -34,6 +35,9 @@ var backlogProcessTimeoutStr string
 var partitionOffset map[int32]*stats.Gauge64
 var partitionLogSize map[int32]*stats.Gauge64
 var partitionLag map[int32]*stats.Gauge64
+var metadataTimeout int
+var metadataBackoffTime int
+var metadataRetries int
 
 // metric cluster.notifier.kafka.messages-published is a counter of messages published to the kafka cluster notifier
 var messagesPublished = stats.NewCounter32("cluster.notifier.kafka.messages-published")
@@ -52,6 +56,9 @@ func init() {
 	fs.StringVar(&dataDir, "data-dir", "", "Directory to store partition offsets index")
 	fs.DurationVar(&offsetCommitInterval, "offset-commit-interval", time.Second*5, "Interval at which offsets should be saved.")
 	fs.StringVar(&backlogProcessTimeoutStr, "backlog-process-timeout", "60s", "Maximum time backlog processing can block during metrictank startup.")
+	fs.IntVar(&metadataBackoffTime, "metadata-backoff-time", 500, "Time to wait between attempts to fetch metadata in ms")
+	fs.IntVar(&metadataTimeout, "consumer-metadata-timeout-ms", 10000, "Maximum time to wait for the broker to send its metadata in ms")
+	fs.IntVar(&metadataRetries, "metadata-retries", 5, "Number of retries to fetch metadata in case of failure")
 	globalconf.Register("kafka-cluster", fs)
 }
 
@@ -70,19 +77,15 @@ func ConfigProcess(instance string) {
 			log.Fatal(4, "kafka-cluster: invalid offest format. %s", err)
 		}
 	}
-	brokers = strings.Split(brokerStr, ",")
 
-	config = sarama.NewConfig()
-	config.ClientID = instance + "-cluster"
-	config.Version = sarama.V0_10_0_0
-	config.Producer.RequiredAcks = sarama.WaitForAll // Wait for all in-sync replicas to ack the message
-	config.Producer.Retry.Max = 10                   // Retry up to 10 times to produce the message
-	config.Producer.Compression = sarama.CompressionSnappy
-	config.Producer.Return.Successes = true
-	err = config.Validate()
-	if err != nil {
-		log.Fatal(2, "kafka-cluster invalid consumer config: %s", err)
-	}
+	config = confluent.ConfigMap{}
+	config.SetKey("client.id", instance+"-cluster")
+	config.SetKey("bootstrap.servers", brokerStr)
+	config.SetKey("compression.codec", "snappy")
+	config.SetKey("retries", 10)
+	config.SetKey("acks", "all")
+	// according to this we need to generated a uuid: https://github.com/edenhill/librdkafka/issues/1210
+	config.SetKey("group.id", uuid.NewV4().String())
 
 	backlogProcessTimeout, err = time.ParseDuration(backlogProcessTimeoutStr)
 	if err != nil {
@@ -105,13 +108,24 @@ func ConfigProcess(instance string) {
 		}
 	}
 	// validate our partitions
-	client, err := sarama.NewClient(brokers, config)
+	client, err := confluent.NewConsumer(&config)
 	if err != nil {
-		log.Fatal(4, "kafka-cluster failed to create client. %s", err)
+		log.Fatal(4, "failed to initialize kafka client. %s", err)
 	}
 	defer client.Close()
 
-	availParts, err := kafka.GetPartitions(client, []string{topic})
+	availPartsByTopic, err := kafka.GetPartitions(client, []string{topic}, metadataRetries, metadataBackoffTime, metadataTimeout)
+	if err != nil {
+		log.Fatal(4, "kafka-mdm: %s", err.Error())
+	}
+
+	var availParts []int32
+	for _, topicPartitions := range availPartsByTopic {
+		for _, part := range topicPartitions {
+			availParts = append(availParts, part)
+		}
+	}
+
 	if err != nil {
 		log.Fatal(4, "kafka-cluster: %s", err.Error())
 	}
@@ -134,7 +148,7 @@ func ConfigProcess(instance string) {
 	// caught up to these offsets.
 	bootTimeOffsets = make(map[int32]int64)
 	for _, part := range partitions {
-		offset, err := client.GetOffset(topic, part, sarama.OffsetNewest)
+		_, offset, err := client.QueryWatermarkOffsets(topic, part, metadataTimeout)
 		if err != nil {
 			log.Fatal(4, "kakfa-cluster: failed to get newest offset for topic %s part %d: %s", topic, part, err)
 		}
@@ -143,5 +157,6 @@ func ConfigProcess(instance string) {
 		partitionLogSize[part] = stats.NewGauge64(fmt.Sprintf("cluster.notifier.kafka.partition.%d.log_size", part))
 		partitionLag[part] = stats.NewGauge64(fmt.Sprintf("cluster.notifier.kafka.partition.%d.lag", part))
 	}
+	fmt.Println(fmt.Sprintf("got bootTimeOffsets: %+v", bootTimeOffsets))
 	log.Info("kafka-cluster: consuming from partitions %v", partitions)
 }

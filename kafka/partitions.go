@@ -1,9 +1,10 @@
 package kafka
 
 import (
-	"fmt"
+	"time"
 
-	"github.com/Shopify/sarama"
+	confluent "github.com/confluentinc/confluent-kafka-go/kafka"
+	"github.com/raintank/worldping-api/pkg/log"
 )
 
 // returns elements that are in a but not in b
@@ -21,25 +22,38 @@ Iter:
 	return diff
 }
 
-func GetPartitions(client sarama.Client, topics []string) ([]int32, error) {
-	partitionCount := 0
-	partitions := make([]int32, 0)
-	var err error
-	for i, topic := range topics {
-		partitions, err = client.Partitions(topic)
-		if err != nil {
-			return nil, fmt.Errorf("Failed to get partitions for topic %s. %s", topic, err)
-		}
-		if len(partitions) == 0 {
-			return nil, fmt.Errorf("No partitions returned for topic %s", topic)
-		}
-		if i > 0 {
-			if len(partitions) != partitionCount {
-				return nil, fmt.Errorf("Configured topics have different partition counts, this is not supported")
+func GetPartitions(client *confluent.Consumer, topics []string, retries, backoff, timeout int) (map[string][]int32, error) {
+	partitions := make(map[string][]int32, 0)
+	var ok bool
+	var tm confluent.TopicMetadata
+	for _, topic := range topics {
+		partitions[topic] = make([]int32, 0)
+		for i := retries; i > 0; i-- {
+			metadata, err := client.GetMetadata(&topic, false, timeout)
+			if err != nil {
+				log.Warn("failed to get metadata from kafka client. %s, %d retries", err, i)
+				time.Sleep(time.Duration(backoff) * time.Millisecond)
+				continue
 			}
-			continue
+
+			if tm, ok := metadata.Topics[topic]; !ok || tm.Error.Code() == confluent.ErrUnknownTopic {
+				log.Warn("unknown topic %s, %d retries", topic, i)
+				time.Sleep(time.Duration(backoff) * time.Millisecond)
+				continue
+			}
+
+			if tm, ok = metadata.Topics[topic]; !ok || len(tm.Partitions) == 0 {
+				log.Warn("0 partitions returned for %s, %d retries", topic, i)
+				time.Sleep(time.Duration(backoff) * time.Millisecond)
+				continue
+			}
+
+			for _, partitionMetadata := range tm.Partitions {
+				partitions[topic] = append(partitions[topic], partitionMetadata.ID)
+			}
 		}
-		partitionCount = len(partitions)
 	}
+
+	log.Info("returning partitions: %+v", partitions)
 	return partitions, nil
 }

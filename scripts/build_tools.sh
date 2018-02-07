@@ -27,7 +27,7 @@ for tool in *; do
     CGO_ENABLED=1 go build -race -ldflags "-X main.gitHash=$GITVERSION" -o $BUILDDIR/$tool || fail
   else
     set -x
-    go build -ldflags "-X main.gitHash=$GITVERSION" -o $BUILDDIR/$tool || fail
+    CGO_ENABLED=1 go build -ldflags "-X main.gitHash=$GITVERSION" -o $BUILDDIR/$tool || fail
   fi
   set +x
   cd ..
