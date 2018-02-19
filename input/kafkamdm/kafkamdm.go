@@ -137,6 +137,7 @@ func ConfigProcess(instance string) {
 	if err != nil {
 		log.Fatal(4, "failed to initialize kafka client. %s", err)
 	}
+	defer client.Close()
 
 	availPartsByTopic, err := kafka.GetPartitions(client, topics, metadataRetries, metadataBackoffTime, metadataTimeout)
 	if err != nil {
