@@ -57,9 +57,6 @@ var consumerFetchMin int
 var consumerSessionTimeout int
 var consumerFetchDefault int
 var consumerMaxWaitTime time.Duration
-var metadataTimeout int
-var metadataBackoffTime int
-var metadataRetries int
 var currentOffsets map[string]map[int32]*int64
 var netMaxOpenRequests int
 var offsetMgr *kafka.OffsetMgr
@@ -68,6 +65,9 @@ var offsetCommitInterval time.Duration
 var partitionOffset map[int32]*stats.Gauge64
 var partitionLogSize map[int32]*stats.Gauge64
 var partitionLag map[int32]*stats.Gauge64
+var metadataTimeout int
+var metadataBackoffTime int
+var metadataRetries int
 
 func ConfigSetup() {
 	inKafkaMdm := flag.NewFlagSet("kafka-mdm-in", flag.ExitOnError)
@@ -316,15 +316,14 @@ func (k *KafkaMdm) consume() {
 	for {
 		select {
 		case ev := <-events:
-			fmt.Println(fmt.Sprintf("packet: %+v", ev))
 			switch e := ev.(type) {
 			case confluent.AssignedPartitions:
 				k.consumer.Assign(e.Partitions)
+				log.Info("Assigned partitions: %+v", e)
 			case confluent.RevokedPartitions:
-				fmt.Println(fmt.Sprintf("%% %v\n", e))
 				k.consumer.Unassign()
+				log.Info("Revoked partitions: %+v", e)
 			case confluent.PartitionEOF:
-				fmt.Printf("%% Reached %v\n", e)
 			case *confluent.Message:
 				topic = *e.TopicPartition.Topic
 				partition = e.TopicPartition.Partition
@@ -347,25 +346,24 @@ func (k *KafkaMdm) consume() {
 
 				atomic.StoreInt64(offsetPtr, offset)
 			case *confluent.Error:
-				fmt.Println(fmt.Sprintf("error: %+v", e))
 				log.Error(3, "kafka-mdm: kafka consumer error: %s", e.String())
 				return
 			default:
-				fmt.Println(fmt.Sprintf("weird: %+v", ev))
+				log.Warn("Unexpected kafka message: %+v", ev)
 			}
 
 		case <-k.stopConsuming:
-			fmt.Println("stopping")
+			log.Info("Stopping consumer thread")
 			return
 		}
 	}
 }
 
 // tryGetOffset will to query kafka repeatedly for the requested offset and give up after attempts unsuccesfull attempts.
-// - if the given offset is <0 (f.e. confluent.OffsetStored) then the first & second returned values will be the
+// - if the given offset is <0 (f.e. confluent.OffsetBeginning) then the first & second returned values will be the
 //   oldest & newest offset for the given topic and partition.
 // - if it is >=0 then the first returned value is the earliest offset whose timestamp is greater than or equal to the
-//   given timestamp and the second returned value can be ignored.
+//   given timestamp and the second returned value will be 0
 func (k *KafkaMdm) tryGetOffset(topic string, partition int32, offsetI int64, attempts int, sleep time.Duration) (int64, int64, error) {
 	offset, err := confluent.NewOffset(offsetI)
 	if err != nil {
@@ -391,11 +389,10 @@ func (k *KafkaMdm) tryGetOffset(topic string, partition int32, offsetI int64, at
 		}
 
 		if err == nil {
-			break
+			return val1, val2, err
 		}
 
-		err = fmt.Errorf("failed to get offset %s of partition %s:%d. %s (attempt %d/%d)", offset.String(), topic, partition, err, attempt, attempts)
-		if attempt == attempts {
+		if attempt >= attempts {
 			break
 		}
 
@@ -404,7 +401,7 @@ func (k *KafkaMdm) tryGetOffset(topic string, partition int32, offsetI int64, at
 		time.Sleep(sleep)
 	}
 
-	return val1, val2, err
+	return 0, 0, fmt.Errorf("failed to get offset %s of partition %s:%d. %s (attempt %d/%d)", offset.String(), topic, partition, err, attempt, attempts)
 }
 
 func (k *KafkaMdm) handleMsg(data []byte, partition int32) {
@@ -422,8 +419,7 @@ func (k *KafkaMdm) handleMsg(data []byte, partition int32) {
 // Stop will initiate a graceful stop of the Consumer (permanent)
 // and block until it stopped.
 func (k *KafkaMdm) Stop() {
-	fmt.Println("stopping kafka input")
-	// closes notifications and messages channels, amongst others
+	log.Info("kafka-mdm: stopping kafka input")
 	close(k.stopConsuming)
 	k.wg.Wait()
 	k.consumer.Close()

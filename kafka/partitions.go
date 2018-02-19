@@ -27,33 +27,36 @@ func GetPartitions(client *confluent.Consumer, topics []string, retries, backoff
 	var ok bool
 	var tm confluent.TopicMetadata
 	for _, topic := range topics {
-		partitions[topic] = make([]int32, 0)
 		for i := retries; i > 0; i-- {
 			metadata, err := client.GetMetadata(&topic, false, timeout)
 			if err != nil {
-				log.Warn("failed to get metadata from kafka client. %s, %d retries", err, i)
+				log.Warn("kafka: failed to get metadata from kafka client. %s, %d retries", err, i)
 				time.Sleep(time.Duration(backoff) * time.Millisecond)
 				continue
 			}
 
+			// if kafka's auto.create.topics is enabled (default) then a topic will get created with the default
+			// settings after our first GetMetadata call for it. But because the topic creation can take a moment
+			// we'll need to retry a fraction of second later in order to actually get the according metadata.
 			if tm, ok := metadata.Topics[topic]; !ok || tm.Error.Code() == confluent.ErrUnknownTopic {
-				log.Warn("unknown topic %s, %d retries", topic, i)
+				log.Warn("kafka: unknown topic %s, %d retries", topic, i)
 				time.Sleep(time.Duration(backoff) * time.Millisecond)
 				continue
 			}
 
 			if tm, ok = metadata.Topics[topic]; !ok || len(tm.Partitions) == 0 {
-				log.Warn("0 partitions returned for %s, %d retries", topic, i)
+				log.Warn("kafka: 0 partitions returned for %s, %d retries", topic, i)
 				time.Sleep(time.Duration(backoff) * time.Millisecond)
 				continue
 			}
 
+			partitions[topic] = make([]int32, len(tm.Partitions))
 			for _, partitionMetadata := range tm.Partitions {
 				partitions[topic] = append(partitions[topic], partitionMetadata.ID)
 			}
 		}
 	}
 
-	log.Info("returning partitions: %+v", partitions)
+	log.Info("kafka: partitions by topic: %+v", partitions)
 	return partitions, nil
 }

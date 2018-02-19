@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	//"github.com/Shopify/sarama"
 	confluent "github.com/confluentinc/confluent-kafka-go/kafka"
 	part "github.com/grafana/metrictank/cluster/partitioner"
 	"github.com/grafana/metrictank/kafka"
@@ -84,7 +83,7 @@ func ConfigProcess(instance string) {
 	config.SetKey("compression.codec", "snappy")
 	config.SetKey("retries", 10)
 	config.SetKey("acks", "all")
-	// according to this we need to generated a uuid: https://github.com/edenhill/librdkafka/issues/1210
+	// according to this we need to generate a uuid: https://github.com/edenhill/librdkafka/issues/1210
 	config.SetKey("group.id", uuid.NewV4().String())
 
 	backlogProcessTimeout, err = time.ParseDuration(backlogProcessTimeoutStr)
