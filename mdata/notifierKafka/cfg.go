@@ -120,10 +120,8 @@ func ConfigProcess(instance string) {
 	}
 
 	var availParts []int32
-	for _, topicPartitions := range availPartsByTopic {
-		for _, part := range topicPartitions {
-			availParts = append(availParts, part)
-		}
+	for _, part := range availPartsByTopic[topic] {
+		availParts = append(availParts, part)
 	}
 
 	if err != nil {

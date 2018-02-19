@@ -27,8 +27,6 @@ var metricsPerMessage = stats.NewMeter32("input.kafka-mdm.metrics_per_message", 
 // metric input.kafka-mdm.metrics_decode_err is a count of times an input message failed to parse
 var metricsDecodeErr = stats.NewCounter32("input.kafka-mdm.metrics_decode_err")
 
-const OffsetUndefined = -100
-
 type KafkaMdm struct {
 	input.Handler
 	consumer   *confluent.Consumer
@@ -56,6 +54,7 @@ var offsetStr string
 var DataDir string
 var channelBufferSize int
 var consumerFetchMin int
+var consumerSessionTimeout int
 var consumerFetchDefault int
 var consumerMaxWaitTime time.Duration
 var metadataTimeout int
@@ -82,8 +81,9 @@ func ConfigSetup() {
 	inKafkaMdm.IntVar(&channelBufferSize, "channel-buffer-size", 1000000, "Maximum number of messages allowed on the producer queue")
 	inKafkaMdm.IntVar(&consumerFetchMin, "consumer-fetch-min", 1, "Minimum number of bytes the broker responds with. If fetch.wait.max.ms expires the accumulated data will be sent to the client regardless of this setting")
 	inKafkaMdm.DurationVar(&consumerMaxWaitTime, "consumer-max-wait-time", time.Second, "Maximum time the broker may wait to fill the response with fetch.min.bytes")
+	inKafkaMdm.IntVar(&consumerSessionTimeout, "consumer-session-timeout", 30000, "Client group session and failure detection timeout in ms")
 	inKafkaMdm.IntVar(&metadataBackoffTime, "metadata-backoff-time", 500, "Time to wait between attempts to fetch metadata in ms")
-	inKafkaMdm.IntVar(&metadataTimeout, "consumer-metadata-timeout-ms", 10000, "Maximum time to wait for the broker to send its metadata in ms")
+	inKafkaMdm.IntVar(&metadataTimeout, "consumer-metadata-timeout-ms", 10000, "Maximum time to wait for the broker to reply to metadata queries in ms")
 	inKafkaMdm.IntVar(&metadataRetries, "metadata-retries", 5, "Number of retries to fetch metadata in case of failure")
 	inKafkaMdm.IntVar(&netMaxOpenRequests, "net-max-open-requests", 100, "Maximum number of in-flight requests per broker connection. This is a generic property applied to all broker communication, however it is primarily relevant to produce requests.")
 	globalconf.Register("kafka-mdm-in", inKafkaMdm)
@@ -91,11 +91,10 @@ func ConfigSetup() {
 
 func getConfig() *confluent.ConfigMap {
 	return &confluent.ConfigMap{
-		// according to this we need to generated a uuid: https://github.com/edenhill/librdkafka/issues/1210
-		"group.id": uuid.NewV4().String(),
-		//"client.id":                             "abc-mdm",
+		// according to this we need to generate a uuid: https://github.com/edenhill/librdkafka/issues/1210
+		"group.id":                              uuid.NewV4().String(),
 		"bootstrap.servers":                     brokerStr,
-		"session.timeout.ms":                    6000,
+		"session.timeout.ms":                    consumerSessionTimeout,
 		"queue.buffering.max.messages":          channelBufferSize,
 		"fetch.min.bytes":                       consumerFetchMin,
 		"fetch.wait.max.ms":                     consumerMaxWaitTime,
@@ -134,7 +133,6 @@ func ConfigProcess(instance string) {
 	}
 	topics = strings.Split(topicStr, ",")
 
-	fmt.Println("configuring consumer")
 	client, err := confluent.NewConsumer(getConfig())
 	if err != nil {
 		log.Fatal(4, "failed to initialize kafka client. %s", err)
@@ -146,8 +144,8 @@ func ConfigProcess(instance string) {
 	}
 
 	var availParts []int32
-	for _, topicPartitions := range availPartsByTopic {
-		for _, part := range topicPartitions {
+	for _, topic := range topics {
+		for _, part := range availPartsByTopic[topic] {
 			availParts = append(availParts, part)
 		}
 	}
@@ -204,33 +202,39 @@ func New() *KafkaMdm {
 func (k *KafkaMdm) startConsumer() error {
 	currentOffsets = make(map[string]map[int32]*int64)
 	var offset confluent.Offset
-	var currentOffset int64
 	var err error
 	var topicPartitions confluent.TopicPartitions
 	for _, topic := range topics {
 		currentOffsets[topic] = make(map[int32]*int64)
 		for _, partition := range partitions {
+			var currentOffset int64
 			switch offsetStr {
 			case "oldest":
-				offset = confluent.OffsetBeginning
-			case "newest":
-				offset = confluent.OffsetEnd
-			case "last":
-				currentOffset, err := offsetMgr.Last(topic, partition)
+				_, currentOffset, err = k.tryGetOffset(topic, partition, int64(confluent.OffsetBeginning), 3, time.Second)
 				if err != nil {
 					return err
 				}
-				offset, err = confluent.NewOffset(currentOffset)
+			case "newest":
+				currentOffset, _, err = k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
+				if err != nil {
+					return err
+				}
+			case "last":
+				currentOffset, err = offsetMgr.Last(topic, partition)
 				if err != nil {
 					return err
 				}
 			default:
 				currentOffset = time.Now().Add(-1*offsetDuration).UnixNano() / int64(time.Millisecond)
-				currentOffset, _, err = k.tryGetOffset(topic, partition, currentOffset, 7, time.Second)
+				currentOffset, _, err = k.tryGetOffset(topic, partition, currentOffset, 3, time.Second)
 				if err != nil {
 					return err
 				}
-				offset = confluent.Offset(currentOffset)
+			}
+
+			offset, err = confluent.NewOffset(currentOffset)
+			if err != nil {
+				return err
 			}
 
 			topicPartitions = append(topicPartitions, confluent.TopicPartition{
@@ -239,24 +243,10 @@ func (k *KafkaMdm) startConsumer() error {
 				Offset:    offset,
 			})
 
-			newest, oldest, err := k.tryGetOffset(topic, partition, int64(confluent.OffsetBeginning), 3, 0)
-			if err != nil {
-				return err
-			}
-
-			if offset == confluent.OffsetEnd {
-				currentOffset = newest
-			} else if offset == confluent.OffsetBeginning {
-				currentOffset = oldest
-			} else {
-				currentOffset = int64(offset)
-			}
-
 			currentOffsets[topic][partition] = &currentOffset
 		}
 	}
 
-	fmt.Println(fmt.Sprintf("assigning %+v", topicPartitions))
 	return k.consumer.Assign(topicPartitions)
 }
 
@@ -264,7 +254,6 @@ func (k *KafkaMdm) Start(handler input.Handler, fatal chan struct{}) error {
 	k.Handler = handler
 	k.fatal = fatal
 
-	fmt.Println("starting kafka input")
 	err := k.startConsumer()
 	if err != nil {
 		log.Error(4, "kafka-mdm: Failed to start consumer: %q", err)
@@ -290,19 +279,18 @@ func (k *KafkaMdm) monitorLag() {
 					log.Error(3, "kafka-mdm failed to commit offset for %s:%d, %s", topic, partition, err)
 				}
 				k.lagMonitor.StoreOffset(partition, offset, ts)
-				newest, _, err := k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 1, 0)
 				partitionOffset[partition].Set(int(offset))
+				newest, _, err := k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
 				if err != nil {
 					partitionLogSize[partition].Set(int(newest))
-					lag := int(newest - offset)
-					partitionLag[partition].Set(lag)
+					partitionLag[partition].Set(int(newest - offset))
 				}
 			}
 		}
 	}
 
-	ticker := time.NewTicker(time.Second * 5)
 	storeOffsets(time.Now())
+	ticker := time.NewTicker(time.Second * 5)
 	for {
 		select {
 		case ts := <-ticker.C:
