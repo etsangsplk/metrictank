@@ -271,7 +271,9 @@ func (k *KafkaMdm) monitorLag() {
 				newest, _, err := k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
 				if err != nil {
 					partitionLogSize[partition].Set(int(newest))
-					partitionLag[partition].Set(int(newest - offset))
+					lag := int(newest - offset)
+					partitionLag[partition].Set(lag)
+					k.lagMonitor.StoreLag(partition, lag)
 				}
 			}
 		}
