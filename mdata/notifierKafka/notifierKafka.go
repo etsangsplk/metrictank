@@ -196,10 +196,13 @@ func (c *NotifierKafka) monitorLag(processBacklog *sync.WaitGroup) {
 		for partition := range currentOffsets {
 			currentOffset := atomic.LoadInt64(currentOffsets[partition])
 			partitionOffset[partition].Set(int(currentOffset))
-			//k.lagMonitor.StoreOffset(partition, currentOffset, ts)
 			if !completed[partition] && currentOffset >= bootTimeOffsets[partition]-1 {
-				completed[partition] = true
 				processBacklog.Done()
+				completed[partition] = true
+				delete(bootTimeOffsets, partition)
+				if len(bootTimeOffsets) == 0 {
+					bootTimeOffsets = nil
+				}
 			}
 
 			_, newest, err := c.consumer.QueryWatermarkOffsets(topic, partition, metadataTimeout)

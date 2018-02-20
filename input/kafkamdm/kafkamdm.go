@@ -265,6 +265,7 @@ func (k *KafkaMdm) monitorLag() {
 		for topic, partitions := range currentOffsets {
 			for partition := range partitions {
 				offset := atomic.LoadInt64(currentOffsets[topic][partition])
+				fmt.Println(fmt.Sprintf("storing to lagMonitor: %d %d %d", partition, offset, ts.Unix()))
 				k.lagMonitor.StoreOffset(partition, offset, ts)
 				partitionOffset[partition].Set(int(offset))
 				newest, _, err := k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
@@ -420,6 +421,7 @@ func (k *KafkaMdm) MaintainPriority() {
 			case <-k.stopConsuming:
 				return
 			case <-ticker.C:
+				fmt.Println(fmt.Sprintf("setting priority to %d", k.lagMonitor.Metric()))
 				cluster.Manager.SetPriority(k.lagMonitor.Metric())
 			}
 		}
