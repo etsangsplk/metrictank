@@ -59,7 +59,6 @@ var consumerFetchDefault int
 var consumerMaxWaitTime time.Duration
 var currentOffsets map[string]map[int32]*int64
 var netMaxOpenRequests int
-var offsetMgr *kafka.OffsetMgr
 var offsetDuration time.Duration
 var offsetCommitInterval time.Duration
 var partitionOffset map[int32]*stats.Gauge64
@@ -74,7 +73,7 @@ func ConfigSetup() {
 	inKafkaMdm.BoolVar(&Enabled, "enabled", false, "")
 	inKafkaMdm.StringVar(&brokerStr, "brokers", "kafka:9092", "tcp address for kafka (may be be given multiple times as a comma-separated list)")
 	inKafkaMdm.StringVar(&topicStr, "topics", "mdm", "kafka topic (may be given multiple times as a comma-separated list)")
-	inKafkaMdm.StringVar(&offsetStr, "offset", "last", "Set the offset to start consuming from. Can be one of newest, oldest,last or a time duration")
+	inKafkaMdm.StringVar(&offsetStr, "offset", "oldest", "Set the offset to start consuming from. Can be one of newest, oldest or a time duration")
 	inKafkaMdm.StringVar(&partitionStr, "partitions", "*", "kafka partitions to consume. use '*' or a comma separated list of id's")
 	inKafkaMdm.DurationVar(&offsetCommitInterval, "offset-commit-interval", time.Second*5, "Interval at which offsets should be saved.")
 	inKafkaMdm.StringVar(&DataDir, "data-dir", "", "Directory to store partition offsets index")
@@ -117,7 +116,6 @@ func ConfigProcess(instance string) {
 	}
 	var err error
 	switch offsetStr {
-	case "last":
 	case "oldest":
 	case "newest":
 	default:
@@ -127,10 +125,6 @@ func ConfigProcess(instance string) {
 		}
 	}
 
-	offsetMgr, err = kafka.NewOffsetMgr(DataDir)
-	if err != nil {
-		log.Fatal(4, "kafka-mdm couldnt create offsetMgr. %s", err)
-	}
 	topics = strings.Split(topicStr, ",")
 
 	client, err := confluent.NewConsumer(getConfig())
@@ -211,17 +205,12 @@ func (k *KafkaMdm) startConsumer() error {
 			var currentOffset int64
 			switch offsetStr {
 			case "oldest":
-				_, currentOffset, err = k.tryGetOffset(topic, partition, int64(confluent.OffsetBeginning), 3, time.Second)
+				currentOffset, _, err = k.tryGetOffset(topic, partition, int64(confluent.OffsetBeginning), 3, time.Second)
 				if err != nil {
 					return err
 				}
 			case "newest":
-				currentOffset, _, err = k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
-				if err != nil {
-					return err
-				}
-			case "last":
-				currentOffset, err = offsetMgr.Last(topic, partition)
+				_, currentOffset, err = k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
 				if err != nil {
 					return err
 				}
@@ -276,9 +265,6 @@ func (k *KafkaMdm) monitorLag() {
 		for topic, partitions := range currentOffsets {
 			for partition := range partitions {
 				offset := atomic.LoadInt64(currentOffsets[topic][partition])
-				if err := offsetMgr.Commit(topic, partition, offset); err != nil {
-					log.Error(3, "kafka-mdm failed to commit offset for %s:%d, %s", topic, partition, err)
-				}
 				k.lagMonitor.StoreOffset(partition, offset, ts)
 				partitionOffset[partition].Set(int(offset))
 				newest, _, err := k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
@@ -320,23 +306,23 @@ func (k *KafkaMdm) consume() {
 			switch e := ev.(type) {
 			case confluent.AssignedPartitions:
 				k.consumer.Assign(e.Partitions)
-				log.Info("Assigned partitions: %+v", e)
+				log.Info("kafka-mdm: Assigned partitions: %+v", e)
 			case confluent.RevokedPartitions:
 				k.consumer.Unassign()
-				log.Info("Revoked partitions: %+v", e)
+				log.Info("kafka-mdm: Revoked partitions: %+v", e)
 			case confluent.PartitionEOF:
 			case *confluent.Message:
 				topic = *e.TopicPartition.Topic
 				partition = e.TopicPartition.Partition
 				offset = int64(e.TopicPartition.Offset)
 				if LogLevel < 2 {
-					log.Debug("kafka-mdm received message: Topic %s, Partition: %d, Offset: %d, Key: %x", topic, partition, offset, e.Key)
+					log.Debug("kafka-mdm: received message: Topic %s, Partition: %d, Offset: %d, Key: %x", topic, partition, offset, e.Key)
 				}
 
 				k.handleMsg(e.Value, partition)
 
 				if currentTopicOffsets, ok = currentOffsets[topic]; !ok {
-					log.Error(3, "kafka-mdm received message of unexpected topic: %s", topic)
+					log.Error(3, "kafka-mdm: received message of unexpected topic: %s", topic)
 					continue
 				}
 
@@ -424,7 +410,6 @@ func (k *KafkaMdm) Stop() {
 	close(k.stopConsuming)
 	k.wg.Wait()
 	k.consumer.Close()
-	offsetMgr.Close()
 }
 
 func (k *KafkaMdm) MaintainPriority() {

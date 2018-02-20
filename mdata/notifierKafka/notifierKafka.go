@@ -13,30 +13,28 @@ import (
 
 	confluent "github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/grafana/metrictank/idx"
-	"github.com/grafana/metrictank/kafka"
 	"github.com/grafana/metrictank/mdata"
 	"github.com/grafana/metrictank/util"
 	"github.com/raintank/worldping-api/pkg/log"
 )
 
 type NotifierKafka struct {
-	instance  string
-	in        chan mdata.SavedChunk
-	buf       []mdata.SavedChunk
-	wg        sync.WaitGroup
-	idx       idx.MetricIndex
-	metrics   mdata.Metrics
-	bPool     *util.BufferPool
-	consumer  *confluent.Consumer
-	producer  *confluent.Producer
-	offsetMgr *kafka.OffsetMgr
-	StopChan  chan int
+	instance string
+	in       chan mdata.SavedChunk
+	buf      []mdata.SavedChunk
+	wg       sync.WaitGroup
+	idx      idx.MetricIndex
+	metrics  mdata.Metrics
+	bPool    *util.BufferPool
+	consumer *confluent.Consumer
+	producer *confluent.Producer
+	StopChan chan int
 
 	// signal to PartitionConsumers to shutdown
 	stopConsuming chan struct{}
 }
 
-var currentOffsets map[string]map[int32]*int64
+var currentOffsets map[int32]*int64
 
 func New(instance string, metrics mdata.Metrics, idx idx.MetricIndex) *NotifierKafka {
 	consumer, err := confluent.NewConsumer(&config)
@@ -49,20 +47,14 @@ func New(instance string, metrics mdata.Metrics, idx idx.MetricIndex) *NotifierK
 		log.Fatal(2, "kafka-cluster failed to initialize producer: %s", err)
 	}
 
-	offsetMgr, err := kafka.NewOffsetMgr(dataDir)
-	if err != nil {
-		log.Fatal(2, "kafka-cluster couldnt create offsetMgr. %s", err)
-	}
-
 	c := NotifierKafka{
-		instance:  instance,
-		in:        make(chan mdata.SavedChunk),
-		idx:       idx,
-		metrics:   metrics,
-		bPool:     util.NewBufferPool(),
-		consumer:  consumer,
-		producer:  producer,
-		offsetMgr: offsetMgr,
+		instance: instance,
+		in:       make(chan mdata.SavedChunk),
+		idx:      idx,
+		metrics:  metrics,
+		bPool:    util.NewBufferPool(),
+		consumer: consumer,
+		producer: producer,
 
 		StopChan:      make(chan int),
 		stopConsuming: make(chan struct{}),
@@ -82,7 +74,6 @@ func (c *NotifierKafka) start() {
 	if err != nil {
 		log.Fatal(4, "kafka-cluster: Failed to start consumer: %s", err)
 	}
-	fmt.Println(fmt.Sprintf("started consumer, waiting for backlog of %d partitions", len(partitions)))
 	processBacklog.Add(len(partitions))
 
 	// wait for our backlog to be processed before returning.  This will block metrictank from consuming metrics until
@@ -112,41 +103,34 @@ func (c *NotifierKafka) start() {
 }
 
 func (c *NotifierKafka) startConsumer() error {
-	currentOffsets = make(map[string]map[int32]*int64)
 	var offset confluent.Offset
 	var err error
 	var topicPartitions confluent.TopicPartitions
-	var currentOffset int64
-	currentOffsets[topic] = make(map[int32]*int64)
+	currentOffsets = make(map[int32]*int64, len(partitions))
 	for _, partition := range partitions {
+		var currentOffset int64
 		switch offsetStr {
 		case "oldest":
-			offset = confluent.OffsetBeginning
-		case "newest":
-			offset = confluent.OffsetEnd
-		case "last":
-			currentOffset, err := c.offsetMgr.Last(topic, partition)
+			currentOffset, _, err = c.tryGetOffset(topic, partition, int64(confluent.OffsetBeginning), 3, time.Second)
 			if err != nil {
 				return err
 			}
-			offset, err = confluent.NewOffset(currentOffset)
+		case "newest":
+			_, currentOffset, err = c.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
 			if err != nil {
 				return err
 			}
 		default:
-			offsetI := time.Now().Add(-1*offsetDuration).UnixNano() / int64(time.Millisecond)
-			times := []confluent.TopicPartition{{Topic: &topic, Partition: partition, Offset: confluent.Offset(offsetI)}}
-			times, err = c.consumer.OffsetsForTimes(times, metadataTimeout)
-			if err == nil {
-				if len(times) == 0 {
-					err = fmt.Errorf("Got 0 topics returned from broker")
-				} else {
-					offset = times[0].Offset
-				}
-			}
+			currentOffset = time.Now().Add(-1*offsetDuration).UnixNano() / int64(time.Millisecond)
+			currentOffset, _, err = c.tryGetOffset(topic, partition, currentOffset, 3, time.Second)
 			if err != nil {
 				return err
 			}
+		}
+
+		offset, err = confluent.NewOffset(currentOffset)
+		if err != nil {
+			return err
 		}
 
 		topicPartitions = append(topicPartitions, confluent.TopicPartition{
@@ -155,25 +139,51 @@ func (c *NotifierKafka) startConsumer() error {
 			Offset:    offset,
 		})
 
-		oldest, newest, err := c.consumer.QueryWatermarkOffsets(topic, partition, metadataTimeout)
-		if err != nil {
-			return err
-		}
-
-		if offset == confluent.OffsetEnd {
-			currentOffset = newest
-		} else if offset == confluent.OffsetBeginning {
-			currentOffset = oldest
-		} else {
-			currentOffset = int64(offset)
-		}
-
-		fmt.Println(fmt.Sprintf("current offset for partition %d is %d", partition, currentOffset))
-		currentOffsets[topic][partition] = &currentOffset
+		currentOffsets[partition] = &currentOffset
 	}
 
 	fmt.Println(fmt.Sprintf("assigning %+v", topicPartitions))
 	return c.consumer.Assign(topicPartitions)
+}
+
+func (c *NotifierKafka) tryGetOffset(topic string, partition int32, offsetI int64, attempts int, sleep time.Duration) (int64, int64, error) {
+	offset, err := confluent.NewOffset(offsetI)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var val1, val2 int64
+
+	attempt := 1
+	for {
+		if offset == confluent.OffsetBeginning || offset == confluent.OffsetEnd {
+			val1, val2, err = c.consumer.QueryWatermarkOffsets(topic, partition, metadataTimeout)
+		} else {
+			times := []confluent.TopicPartition{{Topic: &topic, Partition: partition, Offset: offset}}
+			times, err = c.consumer.OffsetsForTimes(times, metadataTimeout)
+			if err == nil {
+				if len(times) == 0 {
+					err = fmt.Errorf("Got 0 topics returned from broker")
+				} else {
+					val1 = int64(times[0].Offset)
+				}
+			}
+		}
+
+		if err == nil {
+			return val1, val2, err
+		}
+
+		if attempt >= attempts {
+			break
+		}
+
+		log.Warn("kafka-mdm %s", err)
+		attempt += 1
+		time.Sleep(sleep)
+	}
+
+	return 0, 0, fmt.Errorf("failed to get offset %s of partition %s:%d. %s (attempt %d/%d)", offset.String(), topic, partition, err, attempt, attempts)
 }
 
 func (c *NotifierKafka) monitorLag(processBacklog *sync.WaitGroup) {
@@ -183,35 +193,28 @@ func (c *NotifierKafka) monitorLag(processBacklog *sync.WaitGroup) {
 	}
 
 	storeOffsets := func(ts time.Time) {
-		for topic, partitions := range currentOffsets {
-			for partition := range partitions {
-				currentOffset := atomic.LoadInt64(currentOffsets[topic][partition])
-				if err := c.offsetMgr.Commit(topic, partition, currentOffset); err != nil {
-					log.Error(3, "kafka-mdm failed to commit currentOffset for %s:%d, %s", topic, partition, err)
-				} else {
-					partitionOffset[partition].Set(int(currentOffset))
-				}
-				//k.lagMonitor.StoreOffset(partition, currentOffset, ts)
-				if !completed[partition] && currentOffset >= bootTimeOffsets[partition]-1 {
-					completed[partition] = true
-					fmt.Println(fmt.Sprintf("backlog of %d completed", partition))
-					processBacklog.Done()
-				}
+		for partition := range currentOffsets {
+			currentOffset := atomic.LoadInt64(currentOffsets[partition])
+			partitionOffset[partition].Set(int(currentOffset))
+			//k.lagMonitor.StoreOffset(partition, currentOffset, ts)
+			if !completed[partition] && currentOffset >= bootTimeOffsets[partition]-1 {
+				completed[partition] = true
+				processBacklog.Done()
+			}
 
-				_, newest, err := c.consumer.QueryWatermarkOffsets(topic, partition, metadataTimeout)
-				if err == nil {
-					partitionLogSize[partition].Set(int(newest))
-				}
+			_, newest, err := c.consumer.QueryWatermarkOffsets(topic, partition, metadataTimeout)
+			if err == nil {
+				partitionLogSize[partition].Set(int(newest))
+			}
 
-				if currentOffset < 0 {
-					// we have not yet consumed any messages.
-					continue
-				}
+			if currentOffset < 0 {
+				// we have not yet consumed any messages.
+				continue
+			}
 
-				partitionOffset[partition].Set(int(currentOffset))
-				if err == nil {
-					partitionLag[partition].Set(int(newest - currentOffset))
-				}
+			partitionOffset[partition].Set(int(currentOffset))
+			if err == nil {
+				partitionLag[partition].Set(int(newest - currentOffset))
 			}
 		}
 	}
@@ -239,23 +242,24 @@ func (c *NotifierKafka) consume() {
 			switch e := ev.(type) {
 			case confluent.AssignedPartitions:
 				c.consumer.Assign(e.Partitions)
+				log.Info("notifier-kafka: Assigned partitions: %+v", e)
 			case confluent.RevokedPartitions:
-				fmt.Println(fmt.Sprintf("%% %v\n", e))
 				c.consumer.Unassign()
+				log.Info("notifier-kafka: Revoked partitions: %+v", e)
 			case confluent.PartitionEOF:
 				fmt.Printf("%% Reached %v\n", e)
 			case *confluent.Message:
 				if mdata.LogLevel < 2 {
 					tp := e.TopicPartition
-					log.Debug("kafka-cluster received message: Topic %s, Partition: %d, Offset: %d, Key: %x", tp.Topic, tp.Partition, tp.Offset, e.Key)
+					log.Debug("notifier-kafka: received message: Topic %s, Partition: %d, Offset: %d, Key: %x", tp.Topic, tp.Partition, tp.Offset, e.Key)
 				}
 				mdata.Handle(c.metrics, e.Value, c.idx)
 			case *confluent.Error:
-				log.Error(3, "kafka-mdm: kafka consumer error: %s", e.String())
+				log.Error(3, "notifier-kafka: kafka consumer error: %s", e.String())
 				return
 			}
 		case <-c.stopConsuming:
-			log.Info("kafka-cluster consumer ended.")
+			log.Info("notifier-kafka: consumer ended.")
 			return
 		}
 	}
@@ -271,7 +275,6 @@ func (c *NotifierKafka) Stop() {
 
 	go func() {
 		c.wg.Wait()
-		c.offsetMgr.Close()
 		close(c.StopChan)
 	}()
 }

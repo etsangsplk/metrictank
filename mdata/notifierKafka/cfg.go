@@ -51,7 +51,7 @@ func init() {
 	fs.StringVar(&topic, "topic", "metricpersist", "kafka topic")
 	fs.StringVar(&partitionStr, "partitions", "*", "kafka partitions to consume. use '*' or a comma separated list of id's. This should match the partitions used for kafka-mdm-in")
 	fs.StringVar(&partitionScheme, "partition-scheme", "bySeries", "method used for partitioning metrics. This should match the settings of tsdb-gw. (byOrg|bySeries)")
-	fs.StringVar(&offsetStr, "offset", "last", "Set the offset to start consuming from. Can be one of newest, oldest,last or a time duration")
+	fs.StringVar(&offsetStr, "offset", "oldest", "Set the offset to start consuming from. Can be one of newest, oldest or a time duration")
 	fs.StringVar(&dataDir, "data-dir", "", "Directory to store partition offsets index")
 	fs.DurationVar(&offsetCommitInterval, "offset-commit-interval", time.Second*5, "Interval at which offsets should be saved.")
 	fs.StringVar(&backlogProcessTimeoutStr, "backlog-process-timeout", "60s", "Maximum time backlog processing can block during metrictank startup.")
@@ -67,7 +67,6 @@ func ConfigProcess(instance string) {
 	}
 	var err error
 	switch offsetStr {
-	case "last":
 	case "oldest":
 	case "newest":
 	default:
