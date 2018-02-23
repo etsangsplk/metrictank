@@ -265,7 +265,7 @@ func (k *KafkaMdm) monitorLag() {
 		for topic, partitions := range currentOffsets {
 			for partition := range partitions {
 				offset := atomic.LoadInt64(currentOffsets[topic][partition])
-				fmt.Println(fmt.Sprintf("storing to lagMonitor offset: %d %d %d", offset, partition, ts.Unix()))
+				//fmt.Println(fmt.Sprintf("storing to lagMonitor offset: %d %d %d", offset, partition, ts.Unix()))
 				k.lagMonitor.StoreOffset(partition, offset, ts)
 				partitionOffset[partition].Set(int(offset))
 				newest, _, err := k.tryGetOffset(topic, partition, int64(confluent.OffsetEnd), 3, time.Second)
@@ -273,7 +273,7 @@ func (k *KafkaMdm) monitorLag() {
 					partitionLogSize[partition].Set(int(newest))
 					lag := int(newest - offset)
 					partitionLag[partition].Set(lag)
-					fmt.Println(fmt.Sprintf("storing to lagMonitor lag: %d %d %d", lag, partition, ts.Unix()))
+					//fmt.Println(fmt.Sprintf("storing to lagMonitor lag: %d %d %d", lag, partition, ts.Unix()))
 					k.lagMonitor.StoreLag(partition, lag)
 				} else {
 					log.Error(4, "kafka-mdm: Error getting offset: %s", err)
@@ -337,7 +337,7 @@ func (k *KafkaMdm) consume() {
 					continue
 				}
 
-				fmt.Println(fmt.Sprintf("Setting offset for partition: %d %d", offset, partition))
+				//fmt.Println(fmt.Sprintf("Setting offset for partition: %d %d", offset, partition))
 				atomic.StoreInt64(offsetPtr, offset)
 			case *confluent.Error:
 				log.Error(3, "kafka-mdm: kafka consumer error: %s", e.String())
@@ -345,7 +345,11 @@ func (k *KafkaMdm) consume() {
 			default:
 				log.Warn("Unexpected kafka message: %+v", ev)
 			}
-
+		case confluent.OffsetsCommitted:
+			if e.Error != nil {
+				log.Error(3, "kafka-mdmd: Error committing offsets for %+v: %s", e.Offsets, e.Error)
+			}
+			log.Debug("kafka-mdmd: Committed Offsets: %+v", e.Offsets)
 		case <-k.stopConsuming:
 			log.Info("Stopping consumer thread")
 			return
@@ -427,7 +431,7 @@ func (k *KafkaMdm) MaintainPriority() {
 			case <-k.stopConsuming:
 				return
 			case <-ticker.C:
-				fmt.Println(fmt.Sprintf("setting priority to %d", k.lagMonitor.Metric()))
+				//fmt.Println(fmt.Sprintf("setting priority to %d", k.lagMonitor.Metric()))
 				cluster.Manager.SetPriority(k.lagMonitor.Metric())
 			}
 		}

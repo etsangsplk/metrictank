@@ -9,10 +9,10 @@ import (
 func NodeReady() macaron.Handler {
 	return func(c *Context) {
 		if !cluster.Manager.IsReady() {
-			fmt.Println("node not ready")
+			//fmt.Println("node not ready")
 			c.Error(503, "node not ready")
 		} else {
-			fmt.Println("node ready")
+			//fmt.Println("node ready")
 		}
 	}
 }

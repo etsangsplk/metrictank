@@ -153,6 +153,6 @@ func ConfigProcess(instance string) {
 		partitionLogSize[part] = stats.NewGauge64(fmt.Sprintf("cluster.notifier.kafka.partition.%d.log_size", part))
 		partitionLag[part] = stats.NewGauge64(fmt.Sprintf("cluster.notifier.kafka.partition.%d.lag", part))
 	}
-	fmt.Println(fmt.Sprintf("got bootTimeOffsets: %+v", bootTimeOffsets))
+	//fmt.Println(fmt.Sprintf("got bootTimeOffsets: %+v", bootTimeOffsets))
 	log.Info("kafka-cluster: consuming from partitions %v", partitions)
 }
