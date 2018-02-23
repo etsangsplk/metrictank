@@ -342,14 +342,14 @@ func (k *KafkaMdm) consume() {
 			case *confluent.Error:
 				log.Error(3, "kafka-mdm: kafka consumer error: %s", e.String())
 				return
+			case confluent.OffsetsCommitted:
+				if e.Error != nil {
+					log.Error(3, "kafka-mdmd: Error committing offsets for %+v: %s", e.Offsets, e.Error)
+				}
+				log.Debug("kafka-mdmd: Committed Offsets: %+v", e.Offsets)
 			default:
 				log.Warn("Unexpected kafka message: %+v", ev)
 			}
-		case confluent.OffsetsCommitted:
-			if e.Error != nil {
-				log.Error(3, "kafka-mdmd: Error committing offsets for %+v: %s", e.Offsets, e.Error)
-			}
-			log.Debug("kafka-mdmd: Committed Offsets: %+v", e.Offsets)
 		case <-k.stopConsuming:
 			log.Info("Stopping consumer thread")
 			return

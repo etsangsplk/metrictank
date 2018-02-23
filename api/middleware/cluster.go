@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"fmt"
+	//"fmt"
 	"github.com/grafana/metrictank/cluster"
 	macaron "gopkg.in/macaron.v1"
 )
