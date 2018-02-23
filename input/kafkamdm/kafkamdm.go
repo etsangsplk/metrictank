@@ -17,7 +17,6 @@ import (
 	"github.com/grafana/metrictank/input"
 	"github.com/grafana/metrictank/kafka"
 	"github.com/grafana/metrictank/stats"
-	"github.com/twinj/uuid"
 	"gopkg.in/raintank/schema.v1"
 )
 
@@ -43,64 +42,52 @@ func (k *KafkaMdm) Name() string {
 	return "kafka-mdm"
 }
 
-var LogLevel int
-var Enabled bool
-var brokerStr string
-var topicStr string
-var topics []string
-var partitionStr string
-var partitions []int32
-var offsetStr string
 var DataDir string
+var Enabled bool
+var LogLevel int
+var batchNumMessages int
+var brokerStr string
+var bufferMaxMs int
 var channelBufferSize int
-var consumerFetchMin int
-var consumerSessionTimeout int
-var consumerFetchDefault int
-var consumerMaxWaitTime time.Duration
 var currentOffsets map[string]map[int32]*int64
-var netMaxOpenRequests int
-var offsetDuration time.Duration
-var offsetCommitInterval time.Duration
-var partitionOffset map[int32]*stats.Gauge64
-var partitionLogSize map[int32]*stats.Gauge64
-var partitionLag map[int32]*stats.Gauge64
-var metadataTimeout int
+var fetchMin int
+var maxWaitMs int
 var metadataBackoffTime int
 var metadataRetries int
+var metadataTimeout int
+var netMaxOpenRequests int
+var offsetCommitInterval time.Duration
+var offsetDuration time.Duration
+var offsetStr string
+var partitionLag map[int32]*stats.Gauge64
+var partitionLogSize map[int32]*stats.Gauge64
+var partitionOffset map[int32]*stats.Gauge64
+var partitionStr string
+var partitions []int32
+var sessionTimeout int
+var topicStr string
+var topics []string
 
 func ConfigSetup() {
 	inKafkaMdm := flag.NewFlagSet("kafka-mdm-in", flag.ExitOnError)
 	inKafkaMdm.BoolVar(&Enabled, "enabled", false, "")
+	inKafkaMdm.DurationVar(&offsetCommitInterval, "offset-commit-interval", time.Second*5, "Interval at which offsets should be saved.")
+	inKafkaMdm.IntVar(&batchNumMessages, "batch-num-messages", 10000, "Maximum number of messages batched in one MessageSet")
+	inKafkaMdm.IntVar(&bufferMaxMs, "metrics-buffer-max-ms", 100, "Delay in milliseconds to wait for messages in the producer queue to accumulate before constructing message batches (MessageSets) to transmit to brokers")
+	inKafkaMdm.IntVar(&channelBufferSize, "channel-buffer-size", 1000000, "Maximum number of messages allowed on the producer queue")
+	inKafkaMdm.IntVar(&fetchMin, "consumer-fetch-min", 1, "Minimum number of bytes the broker responds with. If fetch.wait.max.ms expires the accumulated data will be sent to the client regardless of this setting")
+	inKafkaMdm.IntVar(&maxWaitMs, "consumer-max-wait-ms", 100, "Maximum time the broker may wait to fill the response with fetch.min.bytes")
+	inKafkaMdm.IntVar(&metadataBackoffTime, "metadata-backoff-time", 500, "Time to wait between attempts to fetch metadata in ms")
+	inKafkaMdm.IntVar(&metadataRetries, "metadata-retries", 5, "Number of retries to fetch metadata in case of failure")
+	inKafkaMdm.IntVar(&metadataTimeout, "consumer-metadata-timeout-ms", 10000, "Maximum time to wait for the broker to reply to metadata queries in ms")
+	inKafkaMdm.IntVar(&netMaxOpenRequests, "net-max-open-requests", 100, "Maximum number of in-flight requests per broker connection. This is a generic property applied to all broker communication, however it is primarily relevant to produce requests.")
+	inKafkaMdm.IntVar(&sessionTimeout, "consumer-session-timeout", 30000, "Client group session and failure detection timeout in ms")
+	inKafkaMdm.StringVar(&DataDir, "data-dir", "", "Directory to store partition offsets index")
 	inKafkaMdm.StringVar(&brokerStr, "brokers", "kafka:9092", "tcp address for kafka (may be be given multiple times as a comma-separated list)")
-	inKafkaMdm.StringVar(&topicStr, "topics", "mdm", "kafka topic (may be given multiple times as a comma-separated list)")
 	inKafkaMdm.StringVar(&offsetStr, "offset", "oldest", "Set the offset to start consuming from. Can be one of newest, oldest or a time duration")
 	inKafkaMdm.StringVar(&partitionStr, "partitions", "*", "kafka partitions to consume. use '*' or a comma separated list of id's")
-	inKafkaMdm.DurationVar(&offsetCommitInterval, "offset-commit-interval", time.Second*5, "Interval at which offsets should be saved.")
-	inKafkaMdm.StringVar(&DataDir, "data-dir", "", "Directory to store partition offsets index")
-	inKafkaMdm.IntVar(&channelBufferSize, "channel-buffer-size", 1000000, "Maximum number of messages allowed on the producer queue")
-	inKafkaMdm.IntVar(&consumerFetchMin, "consumer-fetch-min", 1, "Minimum number of bytes the broker responds with. If fetch.wait.max.ms expires the accumulated data will be sent to the client regardless of this setting")
-	inKafkaMdm.DurationVar(&consumerMaxWaitTime, "consumer-max-wait-time", time.Second, "Maximum time the broker may wait to fill the response with fetch.min.bytes")
-	inKafkaMdm.IntVar(&consumerSessionTimeout, "consumer-session-timeout", 30000, "Client group session and failure detection timeout in ms")
-	inKafkaMdm.IntVar(&metadataBackoffTime, "metadata-backoff-time", 500, "Time to wait between attempts to fetch metadata in ms")
-	inKafkaMdm.IntVar(&metadataTimeout, "consumer-metadata-timeout-ms", 10000, "Maximum time to wait for the broker to reply to metadata queries in ms")
-	inKafkaMdm.IntVar(&metadataRetries, "metadata-retries", 5, "Number of retries to fetch metadata in case of failure")
-	inKafkaMdm.IntVar(&netMaxOpenRequests, "net-max-open-requests", 100, "Maximum number of in-flight requests per broker connection. This is a generic property applied to all broker communication, however it is primarily relevant to produce requests.")
+	inKafkaMdm.StringVar(&topicStr, "topics", "mdm", "kafka topic (may be given multiple times as a comma-separated list)")
 	globalconf.Register("kafka-mdm-in", inKafkaMdm)
-}
-
-func getConfig() *confluent.ConfigMap {
-	return &confluent.ConfigMap{
-		// according to this we need to generate a uuid: https://github.com/edenhill/librdkafka/issues/1210
-		"group.id":                              uuid.NewV4().String(),
-		"bootstrap.servers":                     brokerStr,
-		"session.timeout.ms":                    consumerSessionTimeout,
-		"queue.buffering.max.messages":          channelBufferSize,
-		"fetch.min.bytes":                       consumerFetchMin,
-		"fetch.wait.max.ms":                     consumerMaxWaitTime,
-		"max.in.flight.requests.per.connection": netMaxOpenRequests,
-		"go.application.rebalance.enable":       true,
-		"go.events.channel.enable":              true,
-	}
 }
 
 func ConfigProcess(instance string) {
@@ -111,9 +98,11 @@ func ConfigProcess(instance string) {
 	if offsetCommitInterval == 0 {
 		log.Fatal(4, "kafkamdm: offset-commit-interval must be greater then 0")
 	}
-	if consumerMaxWaitTime == 0 {
+
+	if maxWaitMs == 0 {
 		log.Fatal(4, "kafkamdm: consumer-max-wait-time must be greater then 0")
 	}
+
 	var err error
 	switch offsetStr {
 	case "oldest":
@@ -125,14 +114,14 @@ func ConfigProcess(instance string) {
 		}
 	}
 
-	topics = strings.Split(topicStr, ",")
-
-	client, err := confluent.NewConsumer(getConfig())
+	config := kafka.GetConfig(brokerStr, "none", batchNumMessages, bufferMaxMs, channelBufferSize, fetchMin, netMaxOpenRequests, maxWaitMs, sessionTimeout)
+	client, err := confluent.NewConsumer(config)
 	if err != nil {
 		log.Fatal(4, "failed to initialize kafka client. %s", err)
 	}
 	defer client.Close()
 
+	topics = strings.Split(topicStr, ",")
 	availPartsByTopic, err := kafka.GetPartitions(client, topics, metadataRetries, metadataBackoffTime, metadataTimeout)
 	if err != nil {
 		log.Fatal(4, "kafka-mdm: %s", err.Error())
@@ -162,6 +151,7 @@ func ConfigProcess(instance string) {
 			log.Fatal(4, "kafka-mdm: configured partitions not in list of available partitions. missing %v", missing)
 		}
 	}
+
 	// record our partitions so others (MetricIdx) can use the partitioning information.
 	// but only if the manager has been created (e.g. in metrictank), not when this input plugin is used in other contexts
 	if cluster.Manager != nil {
@@ -180,7 +170,8 @@ func ConfigProcess(instance string) {
 }
 
 func New() *KafkaMdm {
-	consumer, err := confluent.NewConsumer(getConfig())
+	config := kafka.GetConfig(brokerStr, "none", batchNumMessages, bufferMaxMs, channelBufferSize, fetchMin, netMaxOpenRequests, maxWaitMs, sessionTimeout)
+	consumer, err := confluent.NewConsumer(config)
 	if err != nil {
 		log.Fatal(4, "failed to initialize kafka consumer. %s", err)
 	}
@@ -281,7 +272,7 @@ func (k *KafkaMdm) monitorLag() {
 	}
 
 	storeOffsets(time.Now())
-	ticker := time.NewTicker(time.Second * 5)
+	ticker := time.NewTicker(offsetCommitInterval)
 	for {
 		select {
 		case ts := <-ticker.C:
